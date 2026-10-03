@@ -1,0 +1,3 @@
+#!/bin/bash
+sed -i '/WAHA_API_KEY:/a \      AI_GENERATE_URL: ${AI_GENERATE_URL}\n      BOT_API_KEY: ${BOT_API_KEY}\n      WEBHOOK_URL_OVERRIDE: ${WEBHOOK_URL_OVERRIDE}\n      CRM_PROXY_URL: ${CRM_PROXY_URL}\n      CRM_PROXY_SECRET: ${CRM_PROXY_SECRET}\n      ONEPAY_STATUS_URL: ${ONEPAY_STATUS_URL}\n      AI_GATEWAY_URL: ${AI_GATEWAY_URL}\n      LOVABLE_API_KEY: ${LOVABLE_API_KEY}' docker-compose.yml
+docker compose up -d functions

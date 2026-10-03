@@ -56,7 +56,7 @@ Deno.serve(async (req) => {
       const sessionApiKey = session?.session_api_key;
       if (!sessionApiKey) continue;
 
-      const cutoff = new Date(Date.now() - hours * 3600 * 1000).toISOString();
+      const cutoffTime = Date.now() - hours * 3600 * 1000;
       // look back over a bounded window so we never spam very old contacts
       const windowStart = new Date(Date.now() - (hours * 3600 * 1000 + 14 * 24 * 3600 * 1000)).toISOString();
 
@@ -102,7 +102,8 @@ Deno.serve(async (req) => {
       for (const [key, entry] of perContact) {
         if (!entry.lastInbound) continue;
         if (entry.followupAfter) continue; // already followed up since their last message
-        if (entry.lastInbound > cutoff) continue; // not idle long enough
+        const lastInboundTime = new Date(entry.lastInbound.replace(" ", "T")).getTime();
+        if (isNaN(lastInboundTime) || lastInboundTime > cutoffTime) continue; // not idle long enough
         if (orderKeys.has(key)) continue; // customer already ordered — never send
 
         // Skip if the chat has been taken over by a human

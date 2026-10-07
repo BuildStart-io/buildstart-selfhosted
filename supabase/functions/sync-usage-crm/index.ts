@@ -53,9 +53,13 @@ serve(async (req) => {
     const pageSize = 10000;
 
     while (hasMore) {
+      const now = new Date();
+      const firstDayOfMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
+
       const { data, error } = await supabase
         .from("contact_usage")
         .select("user_id, phone_number")
+        .gte("created_at", firstDayOfMonth)
         .range(page * pageSize, (page + 1) * pageSize - 1);
         
       if (error) throw new Error(`Failed to fetch contact usage: ${error.message}`);

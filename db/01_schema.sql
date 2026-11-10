@@ -307,6 +307,132 @@ END;
 $$;
 
 
+--
+-- Name: handle_new_conversation_lead(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.handle_new_conversation_lead() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+  IF NEW.direction = 'inbound' THEN
+    INSERT INTO public.leads (
+      user_id,
+      phone_number,
+      customer_name,
+      status,
+      inbound_count,
+      created_at,
+      updated_at
+    )
+    VALUES (
+      NEW.user_id,
+      NEW.phone_number,
+      COALESCE(NEW.metadata->>'senderName', NULL),
+      'new',
+      1,
+      NEW.created_at,
+      NEW.created_at
+    )
+    ON CONFLICT (user_id, phone_number)
+    DO UPDATE SET
+      inbound_count = public.leads.inbound_count + 1,
+      customer_name = COALESCE(public.leads.customer_name, EXCLUDED.customer_name),
+      updated_at = EXCLUDED.updated_at;
+  ELSE
+    INSERT INTO public.leads (
+      user_id,
+      phone_number,
+      customer_name,
+      status,
+      inbound_count,
+      created_at,
+      updated_at
+    )
+    VALUES (
+      NEW.user_id,
+      NEW.phone_number,
+      NULL,
+      'new',
+      0,
+      NEW.created_at,
+      NEW.created_at
+    )
+    ON CONFLICT (user_id, phone_number)
+    DO UPDATE SET
+      updated_at = EXCLUDED.updated_at;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: get_chat_threads(integer, integer, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.get_chat_threads(_limit integer DEFAULT 50, _offset integer DEFAULT 0, _search text DEFAULT NULL::text) RETURNS TABLE(phone_number text, last_message text, last_time timestamp with time zone, sender_name text, unread_count bigint)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+  v_caller_id uuid;
+  v_target_user_id uuid;
+  v_clean_search text;
+BEGIN
+  v_caller_id := auth.uid();
+  IF v_caller_id IS NULL THEN
+    RETURN;
+  END IF;
+
+  -- Check if caller is staff with conversations permission
+  SELECT sa.owner_id INTO v_target_user_id
+  FROM public.staff_accounts sa
+  WHERE sa.staff_user_id = v_caller_id
+    AND sa.is_active = true
+    AND 'conversations' = ANY (sa.permissions)
+  LIMIT 1;
+
+  -- If not staff, target is caller themselves
+  IF v_target_user_id IS NULL THEN
+    v_target_user_id := v_caller_id;
+  END IF;
+
+  v_clean_search := NULLIF(trim(_search), '');
+
+  RETURN QUERY
+  WITH latest_messages AS (
+    SELECT DISTINCT ON (c.phone_number)
+      c.phone_number,
+      c.message,
+      c.created_at,
+      c.metadata
+    FROM public.conversations c
+    WHERE c.user_id = v_target_user_id
+    ORDER BY c.phone_number, c.created_at DESC
+  )
+  SELECT 
+    lm.phone_number,
+    lm.message AS last_message,
+    lm.created_at AS last_time,
+    COALESCE(NULLIF(l.customer_name, ''), NULLIF(lm.metadata->>'senderName', ''), 'Unknown') AS sender_name,
+    0::bigint AS unread_count
+  FROM latest_messages lm
+  LEFT JOIN public.leads l 
+    ON l.user_id = v_target_user_id 
+   AND l.phone_number = lm.phone_number
+  WHERE v_clean_search IS NULL
+     OR lm.phone_number ILIKE '%' || v_clean_search || '%'
+     OR lm.message ILIKE '%' || v_clean_search || '%'
+     OR COALESCE(l.customer_name, lm.metadata->>'senderName', '') ILIKE '%' || v_clean_search || '%'
+  ORDER BY lm.created_at DESC
+  LIMIT _limit
+  OFFSET _offset;
+END;
+$$;
+
+
 SET default_tablespace = '';
 
 SET default_table_access_method = heap;
@@ -424,6 +550,7 @@ CREATE TABLE public.leads (
     customer_name text,
     assigned_to uuid,
     status text DEFAULT 'new'::text NOT NULL,
+    inbound_count integer DEFAULT 0 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
@@ -841,6 +968,8 @@ CREATE INDEX idx_contact_usage_user_created ON public.contact_usage USING btree 
 --
 
 CREATE INDEX idx_conversations_created_at ON public.conversations USING btree (created_at DESC);
+CREATE INDEX idx_conversations_user_created ON public.conversations USING btree (user_id, created_at DESC);
+CREATE INDEX idx_conversations_user_phone_created ON public.conversations USING btree (user_id, phone_number, created_at ASC);
 
 
 --
@@ -876,6 +1005,7 @@ CREATE INDEX idx_leads_assigned ON public.leads USING btree (assigned_to);
 --
 
 CREATE INDEX idx_leads_user ON public.leads USING btree (user_id);
+CREATE INDEX idx_leads_user_updated ON public.leads USING btree (user_id, updated_at DESC);
 
 
 --
@@ -911,6 +1041,9 @@ CREATE INDEX idx_message_queue_user_processing ON public.message_queue USING btr
 --
 
 CREATE INDEX idx_orders_created_at ON public.orders USING btree (created_at DESC);
+CREATE INDEX idx_orders_user_created ON public.orders USING btree (user_id, created_at DESC);
+CREATE INDEX idx_orders_user_status_created ON public.orders USING btree (user_id, status, created_at DESC);
+CREATE INDEX idx_orders_user_phones ON public.orders USING btree (user_id, customer_phone);
 
 
 --
@@ -925,6 +1058,13 @@ CREATE INDEX idx_orders_status ON public.orders USING btree (status);
 --
 
 CREATE TRIGGER check_order_limit BEFORE INSERT ON public.orders FOR EACH ROW EXECUTE FUNCTION public.enforce_order_limit();
+
+
+--
+-- Name: conversations trg_conversation_sync_lead; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_conversation_sync_lead AFTER INSERT ON public.conversations FOR EACH ROW EXECUTE FUNCTION public.handle_new_conversation_lead();
 
 
 --
@@ -2134,6 +2274,8 @@ GRANT ALL ON TABLE public.user_wsender_sessions TO service_role;
 --
 
 
+
+GRANT EXECUTE ON FUNCTION public.get_chat_threads(integer, integer, text) TO authenticated, service_role;
 
 --
 -- PostgreSQL database dump complete

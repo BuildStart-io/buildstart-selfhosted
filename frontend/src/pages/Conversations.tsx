@@ -57,6 +57,10 @@ export default function Conversations() {
   const [selectedPhone, setSelectedPhone] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [messagesLoading, setMessagesLoading] = useState(false);
+  const [hasMoreThreads, setHasMoreThreads] = useState(true);
+  const [loadingMoreThreads, setLoadingMoreThreads] = useState(false);
+  const [hasMoreMessages, setHasMoreMessages] = useState(false);
+  const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [replyText, setReplyText] = useState("");
   const [sending, setSending] = useState(false);
@@ -104,10 +108,25 @@ export default function Conversations() {
     if (phoneParam && !selectedPhone) {
       setSelectedPhone(phoneParam);
       fetchMessages(phoneParam);
+      setThreads((prev) => {
+        if (!prev.some((t) => t.phone_number === phoneParam)) {
+          return [
+            {
+              phone_number: phoneParam,
+              last_message: "",
+              last_time: new Date().toISOString(),
+              sender_name: "Customer",
+              unread_count: 0,
+            },
+            ...prev,
+          ];
+        }
+        return prev;
+      });
       // Clean up the URL
       setSearchParams({}, { replace: true });
     }
-  }, [searchParams]);
+  }, [searchParams, selectedPhone, fetchMessages, setSearchParams]);
 
   // Fetch all takeover states for the user
   const fetchTakeovers = useCallback(async () => {
@@ -185,37 +204,27 @@ export default function Conversations() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
-  const fetchThreads = useCallback(async () => {
+  const fetchThreads = useCallback(async (search?: string, offset: number = 0) => {
     try {
-      const { data, error } = await supabase
-        .from("conversations")
-        .select("*")
-        .order("created_at", { ascending: false });
+      if (offset === 0) {
+        setLoading(true);
+      } else {
+        setLoadingMoreThreads(true);
+      }
+
+      const limit = 50;
+      const { data, error } = await supabase.rpc("get_chat_threads", {
+        _limit: limit,
+        _offset: offset,
+        _search: search && search.trim() ? search.trim() : null,
+      });
 
       if (error) throw error;
 
-      const threadMap = new Map<string, ChatThread>();
-      (data || []).forEach((msg) => {
-        const existing = threadMap.get(msg.phone_number);
-        const senderName =
-          msg.direction === "inbound"
-            ? (msg.metadata as any)?.senderName || "Unknown"
-            : "";
+      const loaded = (data as ChatThread[]) || [];
+      setHasMoreThreads(loaded.length >= limit);
 
-        if (!existing) {
-          threadMap.set(msg.phone_number, {
-            phone_number: msg.phone_number,
-            last_message: msg.message,
-            last_time: msg.created_at,
-            sender_name: senderName || "Unknown",
-            unread_count: 0,
-          });
-        } else if (senderName && existing.sender_name === "Unknown") {
-          existing.sender_name = senderName;
-        }
-      });
-
-      setThreads(Array.from(threadMap.values()));
+      setThreads((prev) => (offset === 0 ? loaded : [...prev, ...loaded]));
     } catch (error: any) {
       console.error("Error fetching threads:", error);
       toast({
@@ -225,6 +234,7 @@ export default function Conversations() {
       });
     } finally {
       setLoading(false);
+      setLoadingMoreThreads(false);
     }
   }, [toast]);
 
@@ -236,10 +246,13 @@ export default function Conversations() {
           .from("conversations")
           .select("*")
           .eq("phone_number", phoneNumber)
-          .order("created_at", { ascending: true });
+          .order("created_at", { ascending: false })
+          .limit(50);
 
         if (error) throw error;
-        setMessages(data || []);
+        const list = (data || []).reverse();
+        setMessages(list);
+        setHasMoreMessages((data || []).length === 50);
         setTimeout(scrollToBottom, 100);
       } catch (error: any) {
         toast({
@@ -254,9 +267,40 @@ export default function Conversations() {
     [toast]
   );
 
+  const loadOlderMessages = async () => {
+    if (!selectedPhone || messages.length === 0 || loadingOlderMessages) return;
+    setLoadingOlderMessages(true);
+    try {
+      const oldestTimestamp = messages[0].created_at;
+      const { data, error } = await supabase
+        .from("conversations")
+        .select("*")
+        .eq("phone_number", selectedPhone)
+        .lt("created_at", oldestTimestamp)
+        .order("created_at", { ascending: false })
+        .limit(50);
+
+      if (error) throw error;
+      const older = (data || []).reverse();
+      setHasMoreMessages((data || []).length === 50);
+      setMessages((prev) => [...older, ...prev]);
+    } catch (error: any) {
+      toast({
+        title: "Error loading older messages",
+        description: error.message,
+        variant: "destructive",
+      });
+    } finally {
+      setLoadingOlderMessages(false);
+    }
+  };
+
   useEffect(() => {
-    fetchThreads();
-  }, [fetchThreads]);
+    const timer = setTimeout(() => {
+      fetchThreads(searchQuery, 0);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [searchQuery, fetchThreads]);
 
   // Realtime subscription for new messages
   useEffect(() => {
@@ -395,11 +439,14 @@ export default function Conversations() {
     return date.toLocaleDateString([], { month: "short", day: "numeric" });
   };
 
-  const filteredThreads = threads.filter(
-    (t) =>
-      t.phone_number.includes(searchQuery) ||
-      t.sender_name.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  const filteredThreads = searchQuery.trim()
+    ? threads.filter(
+        (t) =>
+          t.phone_number.toLowerCase().includes(searchQuery.toLowerCase()) ||
+          t.sender_name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+          t.last_message.toLowerCase().includes(searchQuery.toLowerCase())
+      )
+    : threads;
 
   return (
     <DashboardLayout>
@@ -531,6 +578,23 @@ export default function Conversations() {
                       </button>
                     );
                   })}
+                  {hasMoreThreads && (
+                    <div className="p-3 text-center border-t">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="w-full text-xs text-muted-foreground hover:text-foreground"
+                        disabled={loadingMoreThreads}
+                        onClick={() => fetchThreads(searchQuery, threads.length)}
+                      >
+                        {loadingMoreThreads ? (
+                          <Loader2 className="h-4 w-4 animate-spin mx-auto" />
+                        ) : (
+                          "Load more chats..."
+                        )}
+                      </Button>
+                    </div>
+                  )}
                 </TooltipProvider>
               )}
             </ScrollArea>
@@ -610,6 +674,23 @@ export default function Conversations() {
                     </div>
                   ) : (
                     <div className="space-y-3">
+                      {hasMoreMessages && (
+                        <div className="text-center py-2">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            disabled={loadingOlderMessages}
+                            onClick={loadOlderMessages}
+                            className="text-xs text-muted-foreground hover:text-foreground"
+                          >
+                            {loadingOlderMessages ? (
+                              <Loader2 className="h-4 w-4 animate-spin mx-auto" />
+                            ) : (
+                              "Load earlier messages"
+                            )}
+                          </Button>
+                        </div>
+                      )}
                       {messages.map((msg) => (
                         <div
                           key={msg.id}

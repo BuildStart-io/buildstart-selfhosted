@@ -74,20 +74,16 @@ export default function Leads() {
     }
     setLoading(true);
     try {
-      const [convRes, orderRes, leadRes, staffRes, settingRes] = await Promise.all([
-        supabase
-          .from("conversations")
-          .select("phone_number, direction, metadata, created_at")
-          .eq("user_id", effectiveUserId)
-          .order("created_at", { ascending: false }),
+      const [orderRes, leadRes, staffRes, settingRes] = await Promise.all([
         supabase
           .from("orders")
           .select("customer_phone, whatsapp_phone")
           .eq("user_id", effectiveUserId),
         supabase
           .from("leads" as any)
-          .select("id, phone_number, customer_name, assigned_to, status")
-          .eq("user_id", effectiveUserId),
+          .select("id, phone_number, customer_name, assigned_to, status, inbound_count, updated_at")
+          .eq("user_id", effectiveUserId)
+          .order("updated_at", { ascending: false }),
         supabase
           .from("staff_accounts")
           .select("staff_user_id, staff_name, staff_email, whatsapp_number")
@@ -111,71 +107,24 @@ export default function Leads() {
         if (o.whatsapp_phone) orderPhones.add(String(o.whatsapp_phone));
       });
 
-      const stats = new Map<
-        string,
-        { inbound: number; name: string; last: string }
-      >();
-      (convRes.data || []).forEach((m: any) => {
-        const entry = stats.get(m.phone_number) || {
-          inbound: 0,
-          name: "",
-          last: m.created_at,
-        };
-        if (m.direction === "inbound") {
-          entry.inbound += 1;
-          if (!entry.name) entry.name = (m.metadata as any)?.senderName || "";
-        }
-        if (m.created_at > entry.last) entry.last = m.created_at;
-        stats.set(m.phone_number, entry);
-      });
+      const built: LeadRow[] = ((leadRes.data as any[]) || []).map((l) => ({
+        id: l.id,
+        phone_number: l.phone_number,
+        customer_name: l.customer_name || "Unknown",
+        assigned_to: l.assigned_to ?? null,
+        status: l.status || "new",
+        inbound_count: l.inbound_count || 0,
+        has_order: orderPhones.has(l.phone_number),
+        last_time: l.updated_at || null,
+      }));
 
-      const leadMap = new Map<string, any>();
-      ((leadRes.data as any[]) || []).forEach((l) => leadMap.set(l.phone_number, l));
-
-      // Owners create missing lead records so staff can be assigned
-      if (isOwner) {
-        const missing = Array.from(stats.entries())
-          .filter(([phone]) => !leadMap.has(phone))
-          .map(([phone, s]) => ({
-            user_id: effectiveUserId,
-            phone_number: phone,
-            customer_name: s.name || null,
-          }));
-        if (missing.length > 0) {
-          const { data: inserted } = await (supabase.from("leads" as any) as any)
-            .upsert(missing, { onConflict: "user_id,phone_number" })
-            .select("id, phone_number, customer_name, assigned_to, status");
-          ((inserted as any[]) || []).forEach((l) => leadMap.set(l.phone_number, l));
-        }
-      }
-
-      const phones = isOwner
-        ? Array.from(new Set([...stats.keys(), ...leadMap.keys()]))
-        : Array.from(leadMap.keys());
-
-      const built: LeadRow[] = phones.map((phone) => {
-        const s = stats.get(phone);
-        const l = leadMap.get(phone);
-        return {
-          id: l?.id ?? null,
-          phone_number: phone,
-          customer_name: l?.customer_name || s?.name || "Unknown",
-          assigned_to: l?.assigned_to ?? null,
-          status: l?.status || "new",
-          inbound_count: s?.inbound || 0,
-          has_order: orderPhones.has(phone),
-          last_time: s?.last || null,
-        };
-      });
-
-      built.sort((a, b) => (b.last_time || "").localeCompare(a.last_time || ""));
       setRows(built);
     } catch (err: any) {
       toast({ title: "Error loading leads", description: err.message, variant: "destructive" });
     } finally {
       setLoading(false);
     }
-  }, [effectiveUserId, isGrowth, isOwner, toast]);
+  }, [effectiveUserId, isGrowth, toast]);
 
   useEffect(() => {
     if (!planLoading) load();

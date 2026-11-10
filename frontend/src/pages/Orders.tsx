@@ -50,24 +50,31 @@ export default function Orders() {
   const [loading, setLoading] = useState(true);
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [page, setPage] = useState(1);
+  const [totalCount, setTotalCount] = useState(0);
+  const [exporting, setExporting] = useState(false);
+  const pageSize = 20;
   const { toast } = useToast();
   const navigate = useNavigate();
 
   const fetchOrders = async () => {
     try {
+      setLoading(true);
       let query = supabase
         .from("orders")
-        .select("*")
-        .order("created_at", { ascending: false });
+        .select("*", { count: "exact" })
+        .order("created_at", { ascending: false })
+        .range((page - 1) * pageSize, page * pageSize - 1);
 
       if (statusFilter !== "all") {
         query = query.eq("status", statusFilter);
       }
 
-      const { data, error } = await query;
+      const { data, count, error } = await query;
 
       if (error) throw error;
       setOrders(data || []);
+      setTotalCount(count ?? 0);
     } catch (error: any) {
       toast({
         title: "Error fetching orders",
@@ -81,7 +88,12 @@ export default function Orders() {
 
   useEffect(() => {
     fetchOrders();
-  }, [statusFilter]);
+  }, [statusFilter, page]);
+
+  const handleStatusFilterChange = (newStatus: string) => {
+    setStatusFilter(newStatus);
+    setPage(1);
+  };
 
   const updateOrderStatus = async (orderId: string, newStatus: string) => {
     try {
@@ -118,52 +130,71 @@ export default function Orders() {
     }
   };
 
-  const exportOrders = (type: "csv" | "excel") => {
-    if (orders.length === 0) {
-      toast({ title: "No orders to export", variant: "destructive" });
-      return;
+  const exportOrders = async (type: "csv" | "excel") => {
+    setExporting(true);
+    try {
+      let query = supabase
+        .from("orders")
+        .select("*")
+        .order("created_at", { ascending: false });
+
+      if (statusFilter !== "all") {
+        query = query.eq("status", statusFilter);
+      }
+
+      const { data, error } = await query;
+      if (error) throw error;
+
+      if (!data || data.length === 0) {
+        toast({ title: "No orders to export", variant: "destructive" });
+        return;
+      }
+
+      const headers = ["Order ID", "Customer Name", "Phone", "District", "Address", "Items", "Payment Method", "Status", "Total (LKR)", "Special Instructions", "Date"];
+      const rows = data.map((o) => {
+        const items = Array.isArray(o.order_items)
+          ? (o.order_items as any[]).map((i: any) => `${i.name} x${i.quantity}`).join("; ")
+          : "";
+        return [
+          o.id.slice(0, 8),
+          o.customer_name,
+          o.customer_phone,
+          o.district || "",
+          o.customer_address || "",
+          items,
+          o.payment_method === "cod" ? "Cash on Delivery" : "Bank Transfer",
+          o.status,
+          o.total_amount.toFixed(2),
+          o.special_instructions || "",
+          format(new Date(o.created_at), "yyyy-MM-dd HH:mm"),
+        ];
+      });
+
+      const csvContent = [headers, ...rows]
+        .map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(","))
+        .join("\n");
+
+      const BOM = "\uFEFF";
+      const blob = new Blob([BOM + csvContent], {
+        type: type === "excel"
+          ? "application/vnd.ms-excel;charset=utf-8"
+          : "text/csv;charset=utf-8",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const filterLabel = statusFilter === "all" ? "all" : statusFilter;
+      a.download = `orders-${filterLabel}-${format(new Date(), "yyyy-MM-dd")}.${type === "excel" ? "xls" : "csv"}`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      toast({ title: `Orders exported as ${type === "excel" ? "Excel" : "CSV"}` });
+    } catch (err: any) {
+      toast({ title: "Export failed", description: err.message, variant: "destructive" });
+    } finally {
+      setExporting(false);
     }
-
-    const headers = ["Order ID", "Customer Name", "Phone", "District", "Address", "Items", "Payment Method", "Status", "Total (LKR)", "Special Instructions", "Date"];
-    const rows = orders.map((o) => {
-      const items = Array.isArray(o.order_items)
-        ? (o.order_items as any[]).map((i: any) => `${i.name} x${i.quantity}`).join("; ")
-        : "";
-      return [
-        o.id.slice(0, 8),
-        o.customer_name,
-        o.customer_phone,
-        o.district || "",
-        o.customer_address || "",
-        items,
-        o.payment_method === "cod" ? "Cash on Delivery" : "Bank Transfer",
-        o.status,
-        o.total_amount.toFixed(2),
-        o.special_instructions || "",
-        format(new Date(o.created_at), "yyyy-MM-dd HH:mm"),
-      ];
-    });
-
-    const csvContent = [headers, ...rows]
-      .map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(","))
-      .join("\n");
-
-    const BOM = "\uFEFF";
-    const blob = new Blob([BOM + csvContent], {
-      type: type === "excel"
-        ? "application/vnd.ms-excel;charset=utf-8"
-        : "text/csv;charset=utf-8",
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    const filterLabel = statusFilter === "all" ? "all" : statusFilter;
-    a.download = `orders-${filterLabel}-${format(new Date(), "yyyy-MM-dd")}.${type === "excel" ? "xls" : "csv"}`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    toast({ title: `Orders exported as ${type === "excel" ? "Excel" : "CSV"}` });
   };
 
   return (
@@ -179,7 +210,7 @@ export default function Orders() {
           </div>
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-sm text-muted-foreground hidden sm:inline">Filter:</span>
-            <Select value={statusFilter} onValueChange={setStatusFilter}>
+            <Select value={statusFilter} onValueChange={handleStatusFilterChange}>
               <SelectTrigger className="w-[140px] sm:w-[150px]">
                 <SelectValue />
               </SelectTrigger>
@@ -192,12 +223,12 @@ export default function Orders() {
                 ))}
               </SelectContent>
             </Select>
-            <Button variant="outline" size="sm" onClick={() => exportOrders("csv")} disabled={orders.length === 0}>
-              <Download className="mr-1.5 h-4 w-4" />
+            <Button variant="outline" size="sm" onClick={() => exportOrders("csv")} disabled={totalCount === 0 || exporting}>
+              {exporting ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <Download className="mr-1.5 h-4 w-4" />}
               CSV
             </Button>
-            <Button variant="outline" size="sm" onClick={() => exportOrders("excel")} disabled={orders.length === 0}>
-              <Download className="mr-1.5 h-4 w-4" />
+            <Button variant="outline" size="sm" onClick={() => exportOrders("excel")} disabled={totalCount === 0 || exporting}>
+              {exporting ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <Download className="mr-1.5 h-4 w-4" />}
               Excel
             </Button>
           </div>
@@ -207,7 +238,7 @@ export default function Orders() {
           <CardHeader>
             <CardTitle>Order List</CardTitle>
             <CardDescription>
-              {orders.length} order{orders.length !== 1 ? "s" : ""} found
+              {totalCount} order{totalCount !== 1 ? "s" : ""} found
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -341,6 +372,44 @@ export default function Orders() {
                     </TableBody>
                   </Table>
                 </div>
+
+                {totalCount > pageSize && (
+                  <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-4 border-t">
+                    <p className="text-xs sm:text-sm text-muted-foreground">
+                      Showing{" "}
+                      <span className="font-medium text-foreground">
+                        {(page - 1) * pageSize + 1}
+                      </span>{" "}
+                      to{" "}
+                      <span className="font-medium text-foreground">
+                        {Math.min(page * pageSize, totalCount)}
+                      </span>{" "}
+                      of{" "}
+                      <span className="font-medium text-foreground">{totalCount}</span> orders
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={page <= 1 || loading}
+                        onClick={() => setPage((p) => Math.max(1, p - 1))}
+                      >
+                        Previous
+                      </Button>
+                      <span className="text-xs sm:text-sm font-medium">
+                        Page {page} of {Math.max(1, Math.ceil(totalCount / pageSize))}
+                      </span>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={page >= Math.ceil(totalCount / pageSize) || loading}
+                        onClick={() => setPage((p) => p + 1)}
+                      >
+                        Next
+                      </Button>
+                    </div>
+                  </div>
+                )}
               </>
             )}
           </CardContent>

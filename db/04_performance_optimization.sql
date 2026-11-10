@@ -191,3 +191,4 @@ END;
 $$;
 
 GRANT EXECUTE ON FUNCTION public.get_chat_threads TO authenticated, service_role;
+

@@ -73,170 +73,35 @@ export default function Conversations() {
   const { effectiveUserId } = useStaffAccess();
   const [searchParams, setSearchParams] = useSearchParams();
 
-  // Fetch tracked FAQ usage phones
-  const fetchTrackedPhones = useCallback(async () => {
-    if (!user) return;
-    try {
-      const { data } = await supabase
-        .from("faq_usage_logs" as any)
-        .select("phone_number, faq_id, faqs!inner(question)")
-        .order("created_at", { ascending: false });
-
-      if (data) {
-        const phoneMap = new Map<string, string[]>();
-        for (const row of data as any[]) {
-          const phone = row.phone_number;
-          const question = row.faqs?.question || "Unknown FAQ";
-          if (!phoneMap.has(phone)) {
-            phoneMap.set(phone, []);
-          }
-          const existing = phoneMap.get(phone)!;
-          if (!existing.includes(question)) {
-            existing.push(question);
-          }
-        }
-        setTrackedPhones(phoneMap);
-      }
-    } catch (err) {
-      console.error("Error fetching tracked phones:", err);
-    }
-  }, [user]);
-
-  // Auto-select phone from URL query param
-  useEffect(() => {
-    const phoneParam = searchParams.get("phone");
-    if (phoneParam && !selectedPhone) {
-      setSelectedPhone(phoneParam);
-      fetchMessages(phoneParam);
-      setThreads((prev) => {
-        if (!prev.some((t) => t.phone_number === phoneParam)) {
-          return [
-            {
-              phone_number: phoneParam,
-              last_message: "",
-              last_time: new Date().toISOString(),
-              sender_name: "Customer",
-              unread_count: 0,
-            },
-            ...prev,
-          ];
-        }
-        return prev;
-      });
-      // Clean up the URL
-      setSearchParams({}, { replace: true });
-    }
-  }, [searchParams, selectedPhone, fetchMessages, setSearchParams]);
-
-  // Fetch all takeover states for the user
-  const fetchTakeovers = useCallback(async () => {
-    if (!user) return;
-    const { data } = await supabase
-      .from("chat_takeovers" as any)
-      .select("phone_number")
-      .eq("user_id", user.id)
-      .eq("is_taken_over", true);
-    if (data) {
-      setTakenOverChats(new Set((data as any[]).map((d: any) => d.phone_number)));
-    }
-  }, [user]);
-
-  useEffect(() => {
-    fetchTakeovers();
-    fetchTrackedPhones();
-  }, [fetchTakeovers, fetchTrackedPhones]);
-
-  const toggleTakeover = useCallback(async (phoneNumber: string) => {
-    if (!user || togglingTakeover) return;
-    setTogglingTakeover(true);
-    try {
-      const isTakenOver = takenOverChats.has(phoneNumber);
-      if (isTakenOver) {
-        await (supabase.from("chat_takeovers" as any) as any)
-          .delete()
-          .eq("user_id", effectiveUserId || user.id)
-          .eq("phone_number", phoneNumber);
-        setTakenOverChats(prev => {
-          const next = new Set(prev);
-          next.delete(phoneNumber);
-          return next;
-        });
-        toast({ title: "Bot re-enabled for this chat" });
-      } else {
-        await (supabase.from("chat_takeovers" as any) as any)
-          .upsert({
-            user_id: effectiveUserId || user.id,
-            phone_number: phoneNumber,
-            is_taken_over: true,
-          }, { onConflict: "user_id,phone_number" });
-        setTakenOverChats(prev => new Set(prev).add(phoneNumber));
-        toast({ title: "Bot paused — you're in control" });
-      }
-    } catch (err: any) {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
-    } finally {
-      setTogglingTakeover(false);
-    }
-  }, [user, takenOverChats, togglingTakeover, toast]);
-
-  const deleteThread = async (phoneNumber: string) => {
-    try {
-      const { error } = await supabase
-        .from("conversations")
-        .delete()
-        .eq("phone_number", phoneNumber);
-      if (error) throw error;
-      await (supabase.from("chat_takeovers" as any) as any)
-        .delete()
-        .eq("phone_number", phoneNumber);
-      if (selectedPhone === phoneNumber) {
-        setSelectedPhone(null);
-        setMessages([]);
-      }
-      setThreads((prev) => prev.filter((t) => t.phone_number !== phoneNumber));
-      toast({ title: "Conversation deleted" });
-    } catch (error: any) {
-      toast({ title: "Error deleting conversation", description: error.message, variant: "destructive" });
-    }
-  };
-
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
-  const fetchThreads = useCallback(async (search?: string, offset: number = 0) => {
-    try {
-      if (offset === 0) {
-        setLoading(true);
-      } else {
-        setLoadingMoreThreads(true);
-      }
+  const formatWhatsAppText = (text: string) => {
+    return (text || "")
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/\*(.+?)\*/g, '<strong>$1</strong>')
+      .replace(/_(.+?)_/g, '<em>$1</em>')
+      .replace(/~(.+?)~/g, '<del>$1</del>');
+  };
 
-      const limit = 50;
-      const { data, error } = await supabase.rpc("get_chat_threads", {
-        _limit: limit,
-        _offset: offset,
-        _search: search && search.trim() ? search.trim() : null,
+  const formatTime = (dateStr: string) => {
+    if (!dateStr) return "";
+    const date = new Date(dateStr);
+    if (isNaN(date.getTime())) return "";
+    const now = new Date();
+    const diff = now.getTime() - date.getTime();
+    const hours = diff / (1000 * 60 * 60);
+
+    if (hours < 24) {
+      return date.toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
       });
-
-      if (error) throw error;
-
-      const loaded = (data as ChatThread[]) || [];
-      setHasMoreThreads(loaded.length >= limit);
-
-      setThreads((prev) => (offset === 0 ? loaded : [...prev, ...loaded]));
-    } catch (error: any) {
-      console.error("Error fetching threads:", error);
-      toast({
-        title: "Error loading conversations",
-        description: error.message,
-        variant: "destructive",
-      });
-    } finally {
-      setLoading(false);
-      setLoadingMoreThreads(false);
     }
-  }, [toast]);
+    if (hours < 48) return "Yesterday";
+    return date.toLocaleDateString([], { month: "short", day: "numeric" });
+  };
 
   const fetchMessages = useCallback(
     async (phoneNumber: string) => {
@@ -295,63 +160,135 @@ export default function Conversations() {
     }
   };
 
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      fetchThreads(searchQuery, 0);
-    }, 300);
-    return () => clearTimeout(timer);
-  }, [searchQuery, fetchThreads]);
+  const fetchThreads = useCallback(async (search?: string, offset: number = 0) => {
+    try {
+      if (offset === 0) {
+        setLoading(true);
+      } else {
+        setLoadingMoreThreads(true);
+      }
 
-  // Realtime subscription for new messages
-  useEffect(() => {
-    const channel = supabase
-      .channel("conversations-realtime")
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: "conversations" },
-        (payload) => {
-          const newMsg = payload.new as Message;
+      const limit = 50;
+      const { data, error } = await supabase.rpc("get_chat_threads", {
+        _limit: limit,
+        _offset: offset,
+        _search: search && search.trim() ? search.trim() : null,
+      });
 
-          setThreads((prev) => {
-            const existing = prev.find(
-              (t) => t.phone_number === newMsg.phone_number
-            );
-            if (existing) {
-              return prev.map((t) =>
-                t.phone_number === newMsg.phone_number
-                  ? {
-                      ...t,
-                      last_message: newMsg.message,
-                      last_time: newMsg.created_at,
-                    }
-                  : t
-              );
-            }
-            return [
-              {
-                phone_number: newMsg.phone_number,
-                last_message: newMsg.message,
-                last_time: newMsg.created_at,
-                sender_name:
-                  (newMsg.metadata as any)?.senderName || "Unknown",
-                unread_count: 0,
-              },
-              ...prev,
-            ];
-          });
+      if (error) throw error;
 
-          if (newMsg.phone_number === selectedPhone) {
-            setMessages((prev) => [...prev, newMsg]);
-            setTimeout(scrollToBottom, 100);
+      const loaded = (data as ChatThread[]) || [];
+      setHasMoreThreads(loaded.length >= limit);
+
+      setThreads((prev) => (offset === 0 ? loaded : [...prev, ...loaded]));
+    } catch (error: any) {
+      console.error("Error fetching threads:", error);
+      toast({
+        title: "Error loading conversations",
+        description: error.message,
+        variant: "destructive",
+      });
+    } finally {
+      setLoading(false);
+      setLoadingMoreThreads(false);
+    }
+  }, [toast]);
+
+  // Fetch tracked FAQ usage phones
+  const fetchTrackedPhones = useCallback(async () => {
+    if (!user) return;
+    try {
+      const { data } = await supabase
+        .from("faq_usage_logs" as any)
+        .select("phone_number, faq_id, faqs!inner(question)")
+        .order("created_at", { ascending: false });
+
+      if (data) {
+        const phoneMap = new Map<string, string[]>();
+        for (const row of data as any[]) {
+          const phone = row.phone_number;
+          const question = row.faqs?.question || "Unknown FAQ";
+          if (!phoneMap.has(phone)) {
+            phoneMap.set(phone, []);
+          }
+          const existing = phoneMap.get(phone)!;
+          if (!existing.includes(question)) {
+            existing.push(question);
           }
         }
-      )
-      .subscribe();
+        setTrackedPhones(phoneMap);
+      }
+    } catch (err) {
+      console.error("Error fetching tracked phones:", err);
+    }
+  }, [user]);
 
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [selectedPhone]);
+  // Fetch all takeover states for the user
+  const fetchTakeovers = useCallback(async () => {
+    if (!user) return;
+    const { data } = await supabase
+      .from("chat_takeovers" as any)
+      .select("phone_number")
+      .eq("user_id", user.id)
+      .eq("is_taken_over", true);
+    if (data) {
+      setTakenOverChats(new Set((data as any[]).map((d: any) => d.phone_number)));
+    }
+  }, [user]);
+
+  const toggleTakeover = useCallback(async (phoneNumber: string) => {
+    if (!user || togglingTakeover) return;
+    setTogglingTakeover(true);
+    try {
+      const isTakenOver = takenOverChats.has(phoneNumber);
+      if (isTakenOver) {
+        await (supabase.from("chat_takeovers" as any) as any)
+          .delete()
+          .eq("user_id", effectiveUserId || user.id)
+          .eq("phone_number", phoneNumber);
+        setTakenOverChats(prev => {
+          const next = new Set(prev);
+          next.delete(phoneNumber);
+          return next;
+        });
+        toast({ title: "Bot re-enabled for this chat" });
+      } else {
+        await (supabase.from("chat_takeovers" as any) as any)
+          .upsert({
+            user_id: effectiveUserId || user.id,
+            phone_number: phoneNumber,
+            is_taken_over: true,
+          }, { onConflict: "user_id,phone_number" });
+        setTakenOverChats(prev => new Set(prev).add(phoneNumber));
+        toast({ title: "Bot paused — you're in control" });
+      }
+    } catch (err: any) {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    } finally {
+      setTogglingTakeover(false);
+    }
+  }, [user, takenOverChats, togglingTakeover, effectiveUserId, toast]);
+
+  const deleteThread = async (phoneNumber: string) => {
+    try {
+      const { error } = await supabase
+        .from("conversations")
+        .delete()
+        .eq("phone_number", phoneNumber);
+      if (error) throw error;
+      await (supabase.from("chat_takeovers" as any) as any)
+        .delete()
+        .eq("phone_number", phoneNumber);
+      if (selectedPhone === phoneNumber) {
+        setSelectedPhone(null);
+        setMessages([]);
+      }
+      setThreads((prev) => prev.filter((t) => t.phone_number !== phoneNumber));
+      toast({ title: "Conversation deleted" });
+    } catch (error: any) {
+      toast({ title: "Error deleting conversation", description: error.message, variant: "destructive" });
+    }
+  };
 
   const handleSelectThread = (phoneNumber: string) => {
     setSelectedPhone(phoneNumber);
@@ -415,36 +352,97 @@ export default function Conversations() {
     }
   };
 
-  const formatWhatsAppText = (text: string) => {
-    return text
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-      .replace(/\*(.+?)\*/g, '<strong>$1</strong>')
-      .replace(/_(.+?)_/g, '<em>$1</em>')
-      .replace(/~(.+?)~/g, '<del>$1</del>');
-  };
+  // Effects placed strictly after callbacks
+  useEffect(() => {
+    fetchTakeovers();
+    fetchTrackedPhones();
+  }, [fetchTakeovers, fetchTrackedPhones]);
 
-  const formatTime = (dateStr: string) => {
-    const date = new Date(dateStr);
-    const now = new Date();
-    const diff = now.getTime() - date.getTime();
-    const hours = diff / (1000 * 60 * 60);
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      fetchThreads(searchQuery, 0);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [searchQuery, fetchThreads]);
 
-    if (hours < 24) {
-      return date.toLocaleTimeString([], {
-        hour: "2-digit",
-        minute: "2-digit",
+  useEffect(() => {
+    const phoneParam = searchParams.get("phone");
+    if (phoneParam && !selectedPhone) {
+      setSelectedPhone(phoneParam);
+      fetchMessages(phoneParam);
+      setThreads((prev) => {
+        if (!prev.some((t) => t.phone_number === phoneParam)) {
+          return [
+            {
+              phone_number: phoneParam,
+              last_message: "",
+              last_time: new Date().toISOString(),
+              sender_name: "Customer",
+              unread_count: 0,
+            },
+            ...prev,
+          ];
+        }
+        return prev;
       });
+      setSearchParams({}, { replace: true });
     }
-    if (hours < 48) return "Yesterday";
-    return date.toLocaleDateString([], { month: "short", day: "numeric" });
-  };
+  }, [searchParams, selectedPhone, fetchMessages, setSearchParams]);
+
+  // Realtime subscription for new messages
+  useEffect(() => {
+    const channel = supabase
+      .channel("conversations-realtime")
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "conversations" },
+        (payload) => {
+          const newMsg = payload.new as Message;
+
+          setThreads((prev) => {
+            const existing = prev.find(
+              (t) => t.phone_number === newMsg.phone_number
+            );
+            if (existing) {
+              const updated = {
+                ...existing,
+                last_message: newMsg.message,
+                last_time: newMsg.created_at,
+              };
+              return [updated, ...prev.filter((t) => t.phone_number !== newMsg.phone_number)];
+            }
+            return [
+              {
+                phone_number: newMsg.phone_number,
+                last_message: newMsg.message,
+                last_time: newMsg.created_at,
+                sender_name:
+                  (newMsg.metadata as any)?.senderName || "Unknown",
+                unread_count: 0,
+              },
+              ...prev,
+            ];
+          });
+
+          if (newMsg.phone_number === selectedPhone) {
+            setMessages((prev) => [...prev, newMsg]);
+            setTimeout(scrollToBottom, 100);
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [selectedPhone]);
 
   const filteredThreads = searchQuery.trim()
     ? threads.filter(
         (t) =>
-          t.phone_number.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          t.sender_name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          t.last_message.toLowerCase().includes(searchQuery.toLowerCase())
+          (t.phone_number || "").toLowerCase().includes(searchQuery.toLowerCase()) ||
+          (t.sender_name || "").toLowerCase().includes(searchQuery.toLowerCase()) ||
+          (t.last_message || "").toLowerCase().includes(searchQuery.toLowerCase())
       )
     : threads;
 
